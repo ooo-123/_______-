@@ -1,0 +1,1477 @@
+
+//@version=5
+strategy('Teddys TripleTrend Turbo Trader 11.0',process_orders_on_close=false, calc_on_every_tick=true, initial_capital=8000000, default_qty_value=2000000, overlay=true, max_bars_back=600,pyramiding=4)
+
+// TODO 
+// 1) A-- or A++ then we add to position if in super trend down or up.. 
+    // or start new position and use tighter tp and SL
+// 2) increase position if we have a red or green circle as we already use for trade entries
+// SSL and AF add new trades
+// 3 Use Market bias for early exiting positions or taking profit early
+// 4 Use confluence of information for when we do Wave trend (reversal) entries
+
+
+
+//==========================================================================//
+//                          Visibility Control Inputs                       //
+//==========================================================================//
+
+showUltraLongSuperTrend = input.bool(true, "Show Ultra Long-Term SuperTrend", group="Visibility")
+showLongSuperTrend      = input.bool(true, "Show Long-Term SuperTrend", group="Visibility")
+showShortSuperTrend     = input.bool(false, "Show Short-Term SuperTrend", group="Visibility")
+showDEMA                = input.bool(true, "Show DEMA", group="Visibility")
+showSupportResistance   = input.bool(true, "Show Support/Resistance", group="Visibility")
+showZScore              = input.bool(true, "Show Z-Score", group="Visibility")
+showPerformanceTable    = input.bool(false, "Show Performance Table", group="Visibility")
+showAndean              = input.bool(true, "Show Andean Oscillator", group="Visibility")
+showWaveTrendSignals    = input.bool(true, "Show WaveTrend Signals", group="Visibility")
+
+// NEW: Show or hide the Smooth Oscillator markers
+showSmoothPriceOscMarkers = input.bool(true, "Show Smooth Price Oscillator Markers?", group="Smooth Price Oscillator")
+
+//==========================================================================//
+//                          Smooth Price Oscillator Inputs                  //
+//==========================================================================//
+
+// Input variables for length and threshold
+int    len_smooth   = input.int(20, "Smoothing Length", group="Smooth Price Oscillator")
+float  threshold    = input.float(1, "Threshold", step = 0.1, group="Smooth Price Oscillator")
+
+// Length for calculating standard deviation
+int    len_std      = input.int(50, "StdDev Length", group="Smooth Price Oscillator")
+
+//==========================================================================//
+//                          Z-Score Integration Inputs                      //
+//==========================================================================//
+import TradingView/ta/7 as ta
+
+// Same inputs as in the Z-Score Suite
+maType        = input.string("Kalman Hull", "Moving Average Type", options = ["SMA", "Hull", "Ema", "Wma", "Dema", "RMA", "LINREG", "TEMA", "ALMA", "Kalman Hull", "T3"], group = "Z-Score Calculation")
+zSrc          = input.source(close, "Z-Score Calculation Source", group = "Z-Score Calculation")
+zMaLen        = input.int(30, "Z-Score Calculation Period", group = "Z-Score Calculation")
+zLookback     = input.int(30, "Z-Score Lookback Period", group = "Z-Score Calculation")
+almaSigma     = input.int(6, "ALMA Sigma (if ALMA Selected)", group = "Z-Score Calculation")
+zShowMarkers  = input.bool(true, "Show Z-Score Extreme Markers?", group = "Z-Score UI")
+
+// Kalman Hull parameters if chosen
+zPriceSource        = input.source(close, "Kalman Price Source", group = "Z-Score Calculation Extra")
+measurementNoise    = input.float(3.0, title="Measurement Noise (Kalman)", step = 1.0, group = "Z-Score Calculation Extra")
+processNoise        = input.float(0.01, title="Process Noise (Kalman)", step = 0.01, group = "Z-Score Calculation Extra")
+
+//==========================================================================//
+//                          Original Strategy Inputs                        //
+//==========================================================================//
+
+// Pips and levels
+pip = syminfo.mintick * 10
+
+// Let users enable or disable the "strong mean reversion" exit logic
+enableStrongExit = input.bool(true, "Enable Early Exit on Strong Mean Reversion?")
+enableMeanRevExit = input.bool(true, "Enable Early Exit on Mean Reversion?", group="Early Exit Settings")
+
+
+enableAndeanValidation = input.bool(false, "Enable Andean Validation?", group="Andean Oscillator")
+enableDualTrendDemaValidation = input.bool(false, "Enable DEMA Validation for Dual Trend?", group="Dual Trend Strategy")
+
+
+// Input parameters for Ultra Long-Term SuperTrend
+ultraLongAtrPeriod = input(title='Ultra Long-Term ATR Period', defval=40)
+ultraLongMultiplier = input.float(title='Ultra Long-Term ATR Multiplier', step=0.1, defval=6.0)
+
+// Input parameters for Long-Term SuperTrend
+longAtrPeriod = input(title='Long-Term ATR Period', defval=20)
+longMultiplier = input.float(title='Long-Term ATR Multiplier', step=0.1, defval=3.5)
+
+// Input parameters for Short-Term SuperTrend
+shortAtrPeriod = input(title='Short-Term ATR Period', defval=10)
+shortMultiplier = input.float(title='Short-Term ATR Multiplier', step=0.1, defval=1.5)
+
+src = input(hl2, title='Source')
+demaLength = input.int(title='DEMA Length', defval=200, minval=1)
+
+// Trend Strength Filter (Ranging Market Detector) inputs
+treshold_level = input.float(title='Trend Strength Threshold', defval=0.05, minval=-0.1, maxval=0.5, step=0.01)
+
+// Option to show Trend Strength indicator
+showTrendStrength = input.bool(defval=true, title="Show Trend Strength Indicator")
+
+// Option to show/hide entry triangles
+showEntryTriangles = input.bool(defval=false, title="Show Entry Triangles")
+dtTpSlLineLength = input.int(5, "Dual Trend TP/SL Line Length", group="Dual Trend Strategy")
+
+// Position size and take-profit settings
+fixedPositionSize = input.float(title='Fixed Position Size', defval=2000000, minval=500000, step=100000)
+// Set Dual Trend entry size to 4M ---
+dualTrendPositionSize = input.float(title='Dualt trend Position Size', defval=6000000, minval=2000000, step=100000)
+
+
+// Date range inputs
+fromMonth = input.int(defval=9, title='From Month', minval=1, maxval=12)
+fromDay   = input.int(defval=1, title='From Day',   minval=1, maxval=31)
+fromYear  = input.int(defval=2018, title='From Year', minval=999)
+toMonth   = input.int(defval=1, title='To Month',   minval=1, maxval=12)
+toDay     = input.int(defval=1, title='To Day',     minval=1, maxval=31)
+toYear    = input.int(defval=9999, title='To Year', minval=999)
+
+// Support and Resistance inputs
+leftBars  = input(10, title='Left Bars')
+rightBars = input(10, title='Right Bars')
+
+// ======================= MARKET BIAS CODE (MINIMAL) =======================
+
+///==========================================================================//
+//                               Market Bias (CEREBR)                        //
+//==========================================================================//
+
+// INPUTS
+ha_htf = input.timeframe('', 'Timeframe', tooltip="This timeframe must be equal to or greater than the chart's timeframe", group="HA Market Bias")
+ha_len = input(150, 'Period', group="HA Market Bias")
+ha_len2 = input(30, 'Smoothing', group="HA Market Bias")
+show_mb = input.bool(true, "Show Market Bias", group='HA Market Bias') 
+col_bull = input.color(color.lime, 'Color: Bullish', group='HA Market Bias')
+col_bear = input.color(color.red, 'Bearish', group='HA Market Bias')
+
+// These add an offset during data importation to avoid lookahead bias
+indexHighTF = timeframe.in_seconds(ha_htf) == timeframe.in_seconds('') ? 0 : barstate.isrealtime ? 1 : 0
+indexCurrTF = timeframe.in_seconds(ha_htf) == timeframe.in_seconds('') ? 0 : barstate.isrealtime ? 0 : 1
+
+//@function Handles the import of data from other timeframes, while preventing repainting
+//@param _resolution (str) : This is the timeframe to import data from.
+//@param _expression (float | int) : This is the data to be imported
+f_no_repaint_request(string _resolution, _expression) =>
+     request.security(syminfo.tickerid, _resolution, _expression[indexHighTF])[indexCurrTF]
+
+// CALCULATIONS
+
+// Smoothen the OHLC values 
+o = ta.ema(open, ha_len)
+c = ta.ema(close, ha_len)
+h = ta.ema(high, ha_len)
+l = ta.ema(low, ha_len)
+
+// Calculate the Heikin Ashi OHLC values from it
+haclose = f_no_repaint_request(ha_htf, (o + h + l + c) / 4)
+xhaopen = f_no_repaint_request(ha_htf, (o + c) / 2)
+haopen = na(xhaopen[1]) ? (o + c) / 2 : (xhaopen[1] + haclose[1]) / 2
+hahigh = math.max(h, math.max(haopen, haclose))
+halow = math.min(l, math.min(haopen, haclose))
+
+// Smoothen the Heiken Ashi Candles
+o2 = f_no_repaint_request(ha_htf, ta.ema(haopen, ha_len2))
+c2 = f_no_repaint_request(ha_htf, ta.ema(haclose, ha_len2))
+h2 = f_no_repaint_request(ha_htf, ta.ema(hahigh, ha_len2))
+l2 = f_no_repaint_request(ha_htf, ta.ema(halow, ha_len2))
+
+ha_avg = (h2 + l2) / 2
+
+// Market Bias Color
+sigcolor = c2 > o2 ? col_bull : col_bear
+
+// Plots
+p_h = plot(h2, "Bias High", color=color(na), display=display.data_window, editable=false)
+p_l = plot(l2, "Bias Low", color=color(na), display=display.data_window, editable=false)
+p_avg = plot(ha_avg, "Bias Average", color=color(na), display=display.data_window, editable=false)
+fill(p_l, p_h, show_mb ? sigcolor : na)
+
+// ==================== END MARKET BIAS SNIPPET =========================
+
+
+//==========================================================================//
+//                           Kalman Hull Functions                           //
+//==========================================================================//
+
+N = 5
+var float[] stateEstimate = array.new_float(N, na)
+var float[] errorCovariance = array.new_float(N, 100.0)
+
+f_init(series float pricesource) =>
+    if na(array.get(stateEstimate, 0))
+        for i = 0 to N-1
+            array.set(stateEstimate, i, pricesource)
+            array.set(errorCovariance, i, 1.0)
+
+f_kalman(series float pricesource, float measurementNoise) =>
+    // Prediction Step
+    predictedStateEstimate = array.new_float(N)
+    predictedErrorCovariance = array.new_float(N)
+    for i = 0 to N-1
+        array.set(predictedStateEstimate, i, array.get(stateEstimate, i))
+        array.set(predictedErrorCovariance, i, array.get(errorCovariance, i) + processNoise)
+
+    kalmanGain = array.new_float(N)
+    for i = 0 to N-1
+        kg = array.get(predictedErrorCovariance, i) / (array.get(predictedErrorCovariance, i) + measurementNoise)
+        array.set(kalmanGain, i, kg)
+        array.set(stateEstimate, i, array.get(predictedStateEstimate, i) + kg * (pricesource - array.get(predictedStateEstimate, i)))
+        array.set(errorCovariance, i, (1 - kg) * array.get(predictedErrorCovariance, i))
+
+    array.get(stateEstimate, 0)
+
+f_init(zPriceSource)
+kalmanFilteredPrice = f_kalman(zPriceSource, measurementNoise)
+KHMA(_src, _length) =>
+    f_kalman(2 * f_kalman(_src, _length / 2) - f_kalman(_src, _length), math.round(math.sqrt(_length)))
+
+
+//=============================================================================
+//     SECTION: SUPER TREND & DEMA
+//=============================================================================
+
+// /*
+//     This function calculates the SuperTrend lines (Up and Down)
+//     plus a trend state: +1 (bullish) or -1 (bearish).
+// */
+supertrend(atrPeriod, multiplier) =>
+    atr  = ta.atr(atrPeriod)
+    up   = src - multiplier * atr
+    up1  = nz(up[1], up)
+    up   := close[1] > up1 ? math.max(up, up1) : up
+    dn   = src + multiplier * atr
+    dn1  = nz(dn[1], dn)
+    dn   := close[1] < dn1 ? math.min(dn, dn1) : dn
+    trend = 1
+    trend := nz(trend[1], trend)
+    trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+    [up, dn, trend]
+
+// 1) Calculate each SuperTrend using the function above
+[ultraLongUp, ultraLongDn, ultraLongTrend] = supertrend(ultraLongAtrPeriod, ultraLongMultiplier)
+[longUp,      longDn,      longTrend]      = supertrend(longAtrPeriod,      longMultiplier)
+[shortUp,     shortDn,     shortTrend]     = supertrend(shortAtrPeriod,     shortMultiplier)
+
+// 2) Plot the SuperTrend lines
+plot(showUltraLongSuperTrend and ultraLongTrend == 1 ? ultraLongUp : na,
+     title='Ultra Long-Term SuperTrend (Up)',
+     style=plot.style_linebr, linewidth=3, color=color.new(color.teal, 0))
+
+plot(showUltraLongSuperTrend and ultraLongTrend != 1 ? ultraLongDn : na,
+     title='Ultra Long-Term SuperTrend (Down)',
+     style=plot.style_linebr, linewidth=3, color=#8B0000)
+
+plot(showLongSuperTrend and longTrend == 1 ? longUp : na,
+     title='Long-Term SuperTrend (Up)',
+     style=plot.style_linebr, linewidth=2, color=#006400)
+
+plot(showLongSuperTrend and longTrend != 1 ? longDn : na,
+     title='Long-Term SuperTrend (Down)',
+     style=plot.style_linebr, linewidth=2, color=#8B0000)
+
+plot(showShortSuperTrend and shortTrend == 1 ? shortUp : na,
+     title='Short-Term SuperTrend (Up)',
+     style=plot.style_linebr, linewidth=1, color=color.lime)
+
+plot(showShortSuperTrend and shortTrend != 1 ? shortDn : na,
+     title='Short-Term SuperTrend (Down)',
+     style=plot.style_linebr, linewidth=1, color=color.red)
+
+// /*
+//     DEMA Calculation (Double Exponential Moving Average).
+//     We simply do 2*EMA - EMA(EMA).
+// */
+ema1  = ta.ema(src, demaLength)
+ema2  = ta.ema(ema1, demaLength)
+dema  = 2.0 * ema1 - ema2
+
+// Example: If you have a color logic from your main script, you can reuse it:
+defaultDemaColor = color.new(#43A047, 0)  // fallback color if needed
+plot(showDEMA ? dema : na,
+     title="DEMA (Double Exponential Moving Average)",
+     color=defaultDemaColor)
+
+//=============================================================================
+//     SECTION: SUPPORT & RESISTANCE
+//=============================================================================
+
+//*
+//     A basic pivot-based Support & Resistance approach:
+//     - We detect recent pivot highs/lows over user-defined bars (leftBars/rightBars).
+//     - Plots them as lines or circles on the chart.
+// */
+
+// 1) Identify pivot highs & lows
+highUsePivot = fixnan(ta.pivothigh(leftBars, rightBars)[1])
+lowUsePivot  = fixnan(ta.pivotlow(leftBars, rightBars)[1])
+
+// 2) Plot S/R lines (or circles) if user toggles them on
+plot(showSupportResistance ? highUsePivot : na,
+     title='Resistance Pivot',
+     color=ta.change(highUsePivot) != 0 ? na : color.new(#FF0000, 50),
+     style=plot.style_circles, linewidth=1, offset=-(rightBars + 1))
+
+plot(showSupportResistance ? lowUsePivot : na,
+     title='Support Pivot',
+     color=ta.change(lowUsePivot) != 0 ? na : color.new(#233dee, 50),
+     style=plot.style_circles, linewidth=1, offset=-(rightBars + 1))
+
+//==========================================================================//
+//                           MA Function for Z-Score                        //
+//==========================================================================//
+
+ma(_src, _len, _type, almaSig) =>
+    switch _type
+        "SMA" => ta.sma(_src, _len)
+        "Hull" => ta.hma(_src, _len)
+        "Ema" => ta.ema(_src, _len)
+        "Wma" => ta.wma(_src, _len)
+        "Dema" => ta.dema(_src, _len)
+        "RMA" => ta.rma(_src, _len)
+        "LINREG" => ta.linreg(_src, _len, 0)
+        "TEMA" => ta.tema(_src, _len)
+        "ALMA" => ta.alma(_src, _len, 0, almaSig)
+        "Kalman Hull" => KHMA(_src, _len)
+        "T3" => ta.t3(_src, _len, 0.7)
+
+// Calculate Z-Score
+subject = ma(zSrc, zMaLen, maType, almaSigma)
+mean    = ta.ema(subject, zLookback)
+stdDev  = ta.stdev(subject, zLookback)
+zScore  = showZScore ? (subject - mean) / stdDev : na
+
+// ======================= AF AND SSL HYBRID SECTION START =======================
+
+// ──────────────────────────────────────────────────────────────────────────
+// 1) AVERAGE FORCE (AF)
+// ──────────────────────────────────────────────────────────────────────────
+sslAfPeriod = input.int(defval=80, title="AF Period", minval=1, step=1, group = "SSL Hybrid + AF") // 80
+sslAfSmooth = input.int(defval=30, title="AF Smooth", minval=1, step=1, group = "SSL Hybrid + AF") // 30
+
+// Average Force function
+sslAfFunc(_series, _high, _low, _period, _postSmooth) =>
+    _p     = math.max(1, _period)
+    hh     = ta.highest(_high, _p)
+    ll     = ta.lowest(_low,  _p)
+    dist   = hh - ll
+    force  = dist == 0.0 ? 0.0 : (_series - ll) / dist - 0.5
+    ta.sma(force, math.max(1, _postSmooth))
+
+// Calculate AF
+sslAF = sslAfFunc(close, high, low, sslAfPeriod, sslAfSmooth)
+
+// Optionally plot the AF histogram if you want to see it
+// plot(sslAF, color=sslAF>0?color.yellow:color.fuchsia, style=plot.style_columns, title="AF")
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2) SSL HYBRID (Original code, unmodified parameters/logic)
+// ──────────────────────────────────────────────────────────────────────────
+show_sslBaseline = input.bool(title="Show Baseline", defval=true, group = "SSL Hybrid + AF")
+show_sslSSL1     = input.bool(title="Show SSL1",     defval=false, group = "SSL Hybrid + AF")
+show_sslAtr      = input.bool(title="Show ATR bands",defval=false, group = "SSL Hybrid + AF")
+
+// ATR inputs
+sslAtrlen     = input.int(14,  "ATR Period", group = "SSL Hybrid + AF")
+sslMult       = input.float(1.0, "ATR Multi", step=0.1, group = "SSL Hybrid + AF")
+sslSmoothing  = input.string(title="ATR Smoothing", defval="WMA", options=["RMA", "SMA", "EMA", "WMA"], group = "SSL Hybrid + AF")
+
+// ATR smoothing function
+sslMa_function(source, length) =>
+    switch sslSmoothing
+        "RMA" => ta.rma(source, length)
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        => ta.wma(source, length)
+
+sslAtr_slen   = sslMa_function(ta.tr(true), sslAtrlen)
+sslUpper_band = sslAtr_slen * sslMult + close
+sslLower_band = close - sslAtr_slen * sslMult
+
+// Baseline/SSL/Exit MAs
+sslMaType    = input.string(title="SSL1 / Baseline Type", defval="Kijun v2",
+ options=["SMA","EMA","DEMA","TEMA","LSMA","WMA","MF","VAMA","TMA","HMA","JMA","Kijun v2","EDSMA","McGinley"], group = "SSL Hybrid + AF")
+sslLen       = input.int(title="SSL1 / Baseline Length",    defval=200, group = "SSL Hybrid + AF")
+sslSSL2Type  = input.string(title="SSL2 / Continuation Type",  defval="JMA",
+ options=["SMA","EMA","DEMA","TEMA","WMA","MF","VAMA","TMA","HMA","JMA","McGinley"], group = "SSL Hybrid + AF")
+sslLen2      = input.int(title="SSL 2 Length", defval=5, group = "SSL Hybrid + AF")
+sslSSL3Type  = input.string(title="EXIT Type",   defval="HMA",
+ options=["DEMA","TEMA","LSMA","VAMA","TMA","HMA","JMA","Kijun v2","McGinley","MF"], group = "SSL Hybrid + AF")
+sslLen3      = input.int(title="EXIT Length", defval=15, group = "SSL Hybrid + AF")
+sslSrc       = input.source(title="Source", defval=close, group = "SSL Hybrid + AF")
+
+// Extra inputs for certain MAs
+sslKidiv              = input.int(defval=1, maxval=4,  title="Kijun MOD Divider", group = "SSL Hybrid + AF")
+sslJurik_phase        = input.int(title="* Jurik (JMA) Only - Phase", defval=3, group = "SSL Hybrid + AF")
+sslJurik_power        = input.int(title="* Jurik (JMA) Only - Power", defval=1, group = "SSL Hybrid + AF")
+sslVolatility_lookback= input.int(10, title="* Volatility Adjusted (VAMA) Only - Volatility lookback length", group = "SSL Hybrid + AF")
+// For Modular Filter
+sslBeta       = input.float(0.8, minval=0, maxval=1, step=0.1, title="Modular Filter, General Filter Only - Beta", group = "SSL Hybrid + AF")
+sslFeedback   = input.bool(false, title="Modular Filter Only - Feedback", group = "SSL Hybrid + AF")
+sslZ          = input.float(0.5,   title="Modular Filter Only - Feedback Weighting", step=0.1, minval=0, maxval=1, group = "SSL Hybrid + AF")
+// EDSMA
+sslSsfLength  = input.int(title="EDSMA - Super Smoother Filter Length", minval=1, defval=20, group = "SSL Hybrid + AF")
+sslSsfPoles   = input.int(title="EDSMA - Super Smoother Filter Poles",  defval=2, options=[2, 3], group = "SSL Hybrid + AF")
+
+// Some helper functions from original
+sslTema(src, length) =>
+    ema1 = ta.ema(src, length)
+    ema2 = ta.ema(ema1, length)
+    ema3 = ta.ema(ema2, length)
+    (3 * ema1) - (3 * ema2) + ema3
+
+sslGet2PoleSSF(_x, _length) =>
+    PI  = 2 * math.asin(1)
+    arg = math.sqrt(2) * PI / _length
+    a1  = math.exp(-arg)
+    b1  = 2 * a1 * math.cos(arg)
+    c2  = b1
+    c3  = -math.pow(a1, 2)
+    c1  = 1 - c2 - c3
+    ssf = 0.0
+    ssf := c1 * _x + c2 * nz(ssf[1]) + c3 * nz(ssf[2])
+
+sslGet3PoleSSF(_x, _length) =>
+    PI  = 2 * math.asin(1)
+    arg = PI / _length
+    a1  = math.exp(-arg)
+    b1  = 2 * a1 * math.cos(1.738 * arg)
+    c1  = math.pow(a1, 2)
+    coef2 = b1 + c1
+    coef3 = -(c1 + b1 * c1)
+    coef4 = math.pow(c1, 2)
+    coef1 = 1 - coef2 - coef3 - coef4
+    ssf = 0.0
+    ssf := coef1 * _x + coef2 * nz(ssf[1]) + coef3 * nz(ssf[2]) + coef4 * nz(ssf[3])
+
+// Master MA function from original code
+sslMa(_type, _src, _len) =>
+    float _r = na
+    if _type == "TMA"
+        _r := ta.sma(ta.sma(_src, math.ceil(_len / 2)), math.floor(_len / 2) + 1)
+    if _type == "MF"
+        ts=0.
+        b=0.
+        c=0.
+        os=0.
+        alpha = 2/(_len+1)
+        a = sslFeedback ? sslZ*_src + (1-sslZ)*nz(ts[1],_src) : _src
+        b := a > alpha*a+(1-alpha)*nz(b[1],a) ? a : alpha*a+(1-alpha)*nz(b[1],a)
+        c := a < alpha*a+(1-alpha)*nz(c[1],a) ? a : alpha*a+(1-alpha)*nz(c[1],a)
+        os := a == b ? 1 : a == c ? 0 : nz(os[1])
+        upper = sslBeta*b+(1-sslBeta)*c
+        lower = sslBeta*c+(1-sslBeta)*b
+        ts := os*upper+(1-os)*lower
+        _r := ts
+    if _type == "LSMA"
+        _r := ta.linreg(_src, _len, 0)
+    if _type == "SMA"
+        _r := ta.sma(_src, _len)
+    if _type == "EMA"
+        _r := ta.ema(_src, _len)
+    if _type == "DEMA"
+        e = ta.ema(_src, _len)
+        _r := 2*e - ta.ema(e, _len)
+    if _type == "TEMA"
+        e = ta.ema(_src, _len)
+        _r := 3*(e - ta.ema(e, _len)) + ta.ema(ta.ema(e, _len), _len)
+    if _type == "WMA"
+        _r := ta.wma(_src, _len)
+    if _type == "VAMA"
+        mid = ta.ema(_src, _len)
+        dev = _src - mid
+        vol_up   = ta.highest(dev, sslVolatility_lookback)
+        vol_down = ta.lowest(dev,  sslVolatility_lookback)
+        _r := mid + math.avg(vol_up, vol_down)
+    if _type == "HMA"
+        _r := ta.wma(2*ta.wma(_src, _len/2) - ta.wma(_src, _len), math.round(math.sqrt(_len)))
+    if _type == "JMA"
+        phaseRatio   = sslJurik_phase < -100 ? 0.5 : sslJurik_phase > 100 ? 2.5 : sslJurik_phase/100 + 1.5
+        betaJ        = 0.45*(_len - 1)/(0.45*(_len - 1)+2)
+        alphaJ       = math.pow(betaJ, sslJurik_power)
+        jma          = 0.0
+        e0           = 0.0
+        e0 := (1 - alphaJ)*_src + alphaJ*nz(e0[1])
+        e1           = 0.0
+        e1 := (_src - e0)*(1 - betaJ) + betaJ*nz(e1[1])
+        e2           = 0.0
+        e2 := (e0 + phaseRatio*e1 - nz(jma[1]))*math.pow(1 - alphaJ,2) + math.pow(alphaJ,2)*nz(e2[1])
+        jma := e2 + nz(jma[1])
+        _r := jma
+    if _type == "Kijun v2"
+        kijun         = math.avg(ta.lowest(_len), ta.highest(_len))
+        conversionLine= math.avg(ta.lowest(_len/sslKidiv), ta.highest(_len/sslKidiv))
+        delta         = (kijun + conversionLine)/2
+        _r := delta
+    if _type == "McGinley"
+        mg = 0.0
+        mg := na(mg[1]) ? ta.ema(_src, _len) : mg[1] + (_src - mg[1]) / (_len * math.pow(_src/mg[1], 4))
+        _r := mg
+    if _type == "EDSMA"
+        zeros    = _src - nz(_src[2])
+        avgZeros = (zeros + zeros[1])/2
+        ssf      = sslSsfPoles == 2 ? sslGet2PoleSSF(avgZeros, sslSsfLength) : sslGet3PoleSSF(avgZeros, sslSsfLength)
+        stdev   = ta.stdev(ssf, _len)
+        scaledFilter = stdev != 0 ? ssf/stdev : 0
+        alphaEd  = 5*math.abs(scaledFilter)/_len
+        eds      = 0.0
+        eds := alphaEd*_src + (1-alphaEd)*nz(eds[1])
+        _r := eds
+    _r
+
+// SSL1
+sslEmaHigh = sslMa(sslMaType, high, sslLen)
+sslEmaLow  = sslMa(sslMaType, low,  sslLen)
+sslHlv = 0
+sslHlv := close > sslEmaHigh ? 1 : close < sslEmaLow ? -1 : nz(sslHlv[1])
+sslSslDown = sslHlv < 0 ? sslEmaHigh : sslEmaLow
+
+// SSL2
+sslMaHigh = sslMa(sslSSL2Type, high, sslLen2)
+sslMaLow  = sslMa(sslSSL2Type, low,  sslLen2)
+sslHlv2 = 0
+sslHlv2 := close > sslMaHigh ? 1 : close < sslMaLow ? -1 : nz(sslHlv2[1])
+sslSslDown2 = sslHlv2 < 0 ? sslMaHigh : sslMaLow
+
+// EXIT
+sslExitHigh = sslMa(sslSSL3Type, high, sslLen3)
+sslExitLow  = sslMa(sslSSL3Type, low,  sslLen3)
+sslHlv3 = 0
+sslHlv3 := close > sslExitHigh ? 1 : close < sslExitLow ? -1 : nz(sslHlv3[1])
+sslSslExit = sslHlv3 < 0 ? sslExitHigh : sslExitLow
+sslBase_cross_Long  = ta.crossover(close, sslSslExit)
+sslBase_cross_Short = ta.crossover(sslSslExit, close)
+sslCodiff           = sslBase_cross_Long ? 1 : sslBase_cross_Short ? -1 : na
+
+// Keltner Baseline Channel
+sslBBMC         = sslMa(sslMaType, close, sslLen)
+useTrueRange = input.bool(true)
+multy        = input.float(0.2, step=0.05, title="Base Channel Multiplier")
+sslKeltma       = sslMa(sslMaType, src, sslLen)
+sslTheRange     = useTrueRange ? ta.tr : high - low
+sslRangema      = ta.ema(sslTheRange, sslLen)
+sslUpperk       = sslKeltma + sslRangema*multy
+sslLowerk       = sslKeltma - sslRangema*multy
+
+// Baseline Violation Candle
+open_pos           = open
+close_pos          = close
+difference         = math.abs(close_pos - open_pos)
+atr_violation      = difference > sslAtr_slen
+sslInRange            = sslUpper_band > sslBBMC and sslLower_band < sslBBMC
+candlesize_violation = atr_violation and sslInRange
+// plotshape(candlesize_violation, color=color.white, size=size.small, style=shape.diamond,
+//  location=location.top, transp=0, title="Candle Size > 1xATR")
+
+// Colors
+// show_color_bar = input.bool(title="Color Bars", defval=false)
+sslColor_bar      = close > sslUpperk ? #00c3ff : close < sslLowerk ? #ff0062 : color.gray
+sslColor_ssl1     = close > sslSslDown ? #00c3ff : close < sslSslDown ? #ff0062 : na
+
+// Plot lines from original SSL Hybrid
+// plotarrow(sslCodiff, colorup=#00c3ff, colordown=#ff0062, title="Exit Arrows", transp=20, maxheight=20, offset=0)
+// p1 = plot(show_sslBaseline ? sslBBMC : na, color=sslColor_bar, linewidth=4, transp=0, title="MA Baseline")
+// sslDownPlot   = plot(show_sslSSL1 ? sslSslDown : na, title="SSL1", linewidth=3, color=sslColor_ssl1, transp=10)
+// barcolor(show_color_bar ? sslColor_bar : na)
+// up_channel   = plot(show_sslBaseline ? sslUpperk : na, color=sslColor_bar, title="Baseline Upper Channel")
+// low_channel  = plot(show_sslBaseline ? sslLowerk : na, color=sslColor_bar, title="Baseline Lower Channel")
+// fill(up_channel, low_channel, color=sslColor_bar, transp=90)
+
+// SSL2 Continuation logic (unchanged)
+sslAtr_crit   = input.float(0.9, step=0.1, title="Continuation ATR Criteria")
+sslUpper_half = sslAtr_slen*sslAtr_crit + close
+sslLower_half = close - sslAtr_slen*sslAtr_crit
+buy_inatr  = sslLower_half < sslSslDown2
+sell_inatr = sslUpper_half > sslSslDown2
+sell_cont  = close < sslBBMC and close < sslSslDown2
+buy_cont  = close > sslBBMC and close > sslSslDown2
+sell_atr   = sell_inatr and sell_cont
+buy_atr    = buy_inatr and buy_cont
+atr_fill   = buy_atr ? color.green : sell_atr ? color.purple : color.white
+// sslLongPlot   = plot(sslSslDown2, title="SSL2", linewidth=2, color=atr_fill, style=plot.style_circles, transp=0)
+// u          = plot(show_sslAtr ? sslUpper_band : na, "+ATR", color=color.white, transp=80)
+// l          = plot(show_sslAtr ? sslLower_band : na, "-ATR", color=color.white, transp=80)
+
+// ──────────────────────────────────────────────────────────────────────────
+// 3) SSL + AF Combined Buy/Sell Signals (Improved for v5)
+// ──────────────────────────────────────────────────────────────────────────
+sslIsBlue = close > sslSslDown
+sslIsRed  = close < sslSslDown
+sslAfPos     = sslAF >  0
+sslAfNeg     = sslAF <  0
+
+sslBuySignal  = sslIsBlue and sslAfPos
+sslSellSignal = sslIsRed  and sslAfNeg
+
+// Plot buy/sell signals only on the first occurrence
+var bool sslLongCondition = false
+var bool sslShortCondition = false
+var bool newSslBuySignal = false
+var bool newSslSellSignal = false
+
+if sslBuySignal and not sslLongCondition
+    sslLongCondition := true
+    sslShortCondition := false
+    newSslBuySignal := true
+
+if sslSellSignal and not sslShortCondition
+    sslLongCondition := false
+    sslShortCondition := true
+    newSslSellSignal := true
+
+// Reset conditions when the opposite signal is encountered
+if sslBuySignal and sslShortCondition
+    sslShortCondition := false
+
+if sslSellSignal and sslLongCondition
+    sslLongCondition := false
+
+plotshape(newSslBuySignal ? true : na, title="SSL+AF BUY", style=shape.labelup, location=location.belowbar,
+ color=color.new(color.lime, 0), text="BUY", size=size.small)
+plotshape(newSslSellSignal ? true : na, title="SSL+AF SELL", style=shape.labeldown, location=location.abovebar,
+ color=color.new(color.red, 0), text="SELL", size=size.small)
+
+
+
+// ──────────────────────────────────────────────────────────────────────────
+// 4) SSL Hybrid single line plot
+// ──────────────────────────────────────────────────────────────────────────
+
+// Determine the overall SSL Hybrid color
+var color sslSslColor = na
+sslSslColor := if sslIsBlue
+    #00c3ff // Blue
+else if sslIsRed
+    #ff0062 // Red
+else
+    na
+
+// Plot a single line with the overall SSL Hybrid color
+plot(show_sslBaseline? sslBBMC : na, color=sslSslColor, linewidth=2, title="SSL Hybrid Line")
+
+// ======================= AF AND SSL HYBRID SECTION END =======================
+
+//==========================================================================//
+//                      TRADING SECTION START (SSL + AF Only)               //
+//==========================================================================//
+
+// // Time window function (moved here for clarity)
+window() =>
+    time >= timestamp(fromYear, fromMonth, fromDay, 00, 00) and time <= timestamp(toYear, toMonth, toDay, 23, 59)
+
+
+
+//==========================================================================//
+//                       TRADING SECTION END (SSL + AF Only)                //
+//==========================================================================//
+
+// normalized_slope_decline = (klmf_diff - av_klmf_diff) / av_klmf_diff
+// trend_condition = normalized_slope_decline >= treshold_level
+
+// // DEMA Color Change Based on Trend Strength
+// demaColor = switch
+//     trend_condition and showTrendStrength => color.green
+//     not trend_condition and showTrendStrength => color.red
+//     => #43A047
+
+// plot(showDEMA ? dema : na, title="DEMA (Double Exponential Moving Average)", color=demaColor)
+
+
+
+
+// // DEMA Color Change Based on Trend Strength
+// demaColor = switch
+//     trend_condition and showTrendStrength => color.green
+//     not trend_condition and showTrendStrength => color.red
+// //     => #43A047
+
+// plot(showDEMA ? dema : na, title="DEMA (Double Exponential Moving Average)", color=demaColor)
+
+//==========================================================================//
+//                         Z-Score Extreme Markers                          //
+//==========================================================================//
+overbought      = zShowMarkers and zScore > 3
+mild_overbought = zShowMarkers and zScore > 2 and zScore < 3
+oversold        = zShowMarkers and zScore < -3
+mild_oversold   = zShowMarkers and zScore < -2 and zScore > -3
+
+// Overbought (Z > 3): Red downward triangle at top
+plotshape(showZScore and overbought ? zScore : na, title="Overbought (Z>3)", style=shape.triangledown, color=color.red, location=location.abovebar, size=size.tiny, text="+")
+
+// Mildly Overbought (2 < Z < 3): Orange downward circle
+plotshape(showZScore and mild_overbought ? zScore : na, title="Mildly Overbought (2<Z<3)", style=shape.circle, color=color.orange, location=location.abovebar, size=size.tiny, text="")
+
+// Oversold (Z < -3): Green upward triangle at bottom
+plotshape(showZScore and oversold ? zScore : na, title="Oversold (Z<-3)", style=shape.triangleup, color=color.green, location=location.belowbar, size=size.tiny, text="+")
+
+// Mildly Oversold (-3 < Z < -2): Lime upward circle
+plotshape(showZScore and mild_oversold ? zScore : na, title="Mildly Oversold (-3<Z<-2)", style=shape.circle, color=color.lime, location=location.belowbar, size=size.tiny, text="")
+
+//==========================================================================//
+//                         Performance Table (unchanged)                    //
+//==========================================================================//
+
+dailyClose1   = request.security(syminfo.tickerid, "D", close[1])
+dailyClose2   = request.security(syminfo.tickerid, "D", close[2])
+weeklyClose1  = request.security(syminfo.tickerid, "W", close[1])
+monthlyClose1 = request.security(syminfo.tickerid, "M", close[1])
+monthlyClose3 = request.security(syminfo.tickerid, "M", close[3])
+
+maxLookback = 15000
+
+getLookbackPeriod(periodString) =>
+    timeframeInMinutes = timeframe.multiplier * (
+      timeframe.isseconds ? 1. / 60 :
+      timeframe.isminutes ? 1 :
+      timeframe.isdaily   ? 1440 :
+      timeframe.isweekly  ? 10080 :
+      timeframe.ismonthly ? 43800 : 0
+      )
+    lookback = switch periodString
+        "1 Day"   => math.round(1440 / timeframeInMinutes)
+        "2 Days"  => math.round(2880 / timeframeInMinutes)
+        "1 Week"  => math.round(10080 / timeframeInMinutes)
+        "1 Month" => math.round(43800 / timeframeInMinutes)
+        "3 Months"=> math.round(131400 / timeframeInMinutes)
+        => 0
+    math.min(lookback, maxLookback)
+
+calculateProximityAndPips(highValue, lowValue, closeValue) =>
+    distToHigh    = math.abs(highValue - closeValue)
+    distToLow     = math.abs(closeValue - lowValue)
+    closerToHigh  = distToHigh < distToLow
+    closerDist    = closerToHigh ? distToHigh : distToLow
+    proximity     = (closerDist / closeValue) * 100
+    pipsFloat     = closerDist / pip
+    pipsAway      = math.round(pipsFloat * 10) / 10.0
+    chosenColor   = closerToHigh ? color.red : color.green
+    [proximity, chosenColor, pipsAway]
+
+rangeData(length) =>
+    if length > maxLookback
+        [na, na, na, na, na]
+    else
+        hh = ta.highest(high, length)
+        ll = ta.lowest(low, length)
+        [proximityValue, proximityColor, pipsAway] = calculateProximityAndPips(hh, ll, close)
+        [hh, ll, proximityValue, proximityColor, pipsAway]
+
+var table infoTable = table.new(position.top_right, 6, 6, border_width=1)
+
+updateTableCell(table, col, row, periodString) =>
+    lookback = getLookbackPeriod(periodString)
+    [highValue, lowValue, proximityValue, proximityColor, pipsAway] = rangeData(lookback)
+
+    float perf = na
+    float oldClose = na
+
+    if periodString == "1 Day"
+        oldClose := dailyClose1
+    else if periodString == "2 Days"
+        oldClose := dailyClose2
+    else if periodString == "1 Week"
+        oldClose := weeklyClose1
+    else if periodString == "1 Month"
+        oldClose := monthlyClose1
+    else if periodString == "3 Months"
+        oldClose := monthlyClose3
+
+    if not na(oldClose)
+        perf := ((close - oldClose) / oldClose) * 100
+
+    if not na(highValue)
+        highTextColor = proximityColor == color.red   ? color.red   : color.new(color.white,0)
+        lowTextColor  = proximityColor == color.green ? color.green : color.new(color.white,0)
+
+        table.cell(table, 0, row, periodString)
+        table.cell(table, 1, row, str.format("{0,number,##.####}", highValue), text_color=highTextColor)
+        table.cell(table, 2, row, str.format("{0,number,##.####}", lowValue),  text_color=lowTextColor)
+        table.cell(table, 3, row, str.format("{0,number,##.##}%", proximityValue), text_color=proximityColor)
+        table.cell(table, 4, row, str.format("{0,number,.}", pipsAway), text_color=color.new(color.white,0))
+        table.cell(table, 5, row, na(perf) ? "na" : str.format("{0,number,##.##}%", perf), text_color=color.new(color.white,0))
+
+if showPerformanceTable
+    table.clear(infoTable, 0, 0, 5, 5)
+
+    // Header row
+    table.cell(infoTable, 0, 0, "Period", text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(infoTable, 1, 0, "High", text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(infoTable, 2, 0, "Low",  text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(infoTable, 3, 0, "Proximity to Nearest", text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(infoTable, 4, 0, "Pips to Nearest",      text_color=color.white, bgcolor=color.new(color.blue, 0))
+    table.cell(infoTable, 5, 0, "Perf%",               text_color=color.white, bgcolor=color.new(color.blue, 0))
+
+    // Update each row
+    updateTableCell(infoTable, 0, 1, "1 Day")
+    updateTableCell(infoTable, 0, 2, "2 Days")
+    updateTableCell(infoTable, 0, 3, "1 Week")
+    updateTableCell(infoTable, 0, 4, "1 Month")
+    updateTableCell(infoTable, 0, 5, "3 Months")
+
+//==========================================================================//
+//                          Andean Oscillator                               //
+//==========================================================================//
+
+andeanLength    = input.int(100, "Andean Length", minval=1, group="Andean Oscillator") // 50 default
+andeanSigLength = input.int(30,  "Andean Signal Length", minval=1, group="Andean Oscillator") // 9 default
+
+var float bullVal   = na
+var float bearVal   = na
+var float signalVal = na
+
+if showAndean
+    alpha = 2.0 / (andeanLength + 1.0)
+    C     = close
+    O     = open
+
+    var float up1 = na
+    var float up2 = na
+    var float dn1 = na
+    var float dn2 = na
+
+    // Compute exponential envelopes
+    up1 := nz(math.max(C, O, up1[1] - (up1[1] - C)*alpha), C)
+    up2 := nz(math.max(C*C, O*O, up2[1] - (up2[1] - C*C)*alpha), C*C)
+    dn1 := nz(math.min(C, O, dn1[1] + (C - dn1[1])*alpha), C)
+    dn2 := nz(math.min(C*C, O*O, dn2[1] + (C*C - dn2[1])*alpha), C*C)
+
+    bull   = math.sqrt(dn2 - dn1*dn1)
+    bear   = math.sqrt(up2 - up1*up1)
+    signal = ta.ema(math.max(bull, bear), andeanSigLength)
+
+    bullVal   := bull
+    bearVal   := bear
+    signalVal := signal
+else
+    bullVal   := na
+    bearVal   := na
+    signalVal := na
+
+bullPlot = plot(showAndean ? bullVal : na, title="Bullish Component", color=color.new(color.green, 60), linewidth=1)
+bearPlot = plot(showAndean ? bearVal : na, title="Bearish Component", color=color.new(color.red, 60),   linewidth=1)
+sigPlot  = plot(showAndean ? signalVal : na, title="Signal",          color=color.new(color.orange, 0), linewidth=2)
+
+// Fill area between bull and bear
+fill(bullPlot, bearPlot, title="Bull-Bear Fill", color= showAndean ? color.new(color.gray, 85) : na)
+
+bullCross = ta.crossover(bullVal, bearVal)
+bearCross = ta.crossunder(bullVal, bearVal)
+
+bullDominance = bullVal > bearVal and bullVal > signalVal
+bearDominance = bearVal > bullVal and bearVal > signalVal
+noDirection   = signalVal > bullVal and signalVal > bearVal
+
+var int  lastDominance = 0
+currentDominance       = bullDominance ? 1 : bearDominance ? -1 : 0
+dominanceChanged       = currentDominance != lastDominance
+
+var bool bullDomStartPlot = false
+var bool bearDomStartPlot = false
+var bool bullDomEndPlot   = false
+var bool bearDomEndPlot   = false
+
+bullDomStartPlot := false
+bearDomStartPlot := false
+bullDomEndPlot   := false
+bearDomEndPlot   := false
+
+if dominanceChanged
+    if currentDominance == 1
+        bullDomStartPlot := true
+    if currentDominance == -1
+        bearDomStartPlot := true
+    if currentDominance == 0
+        if lastDominance == 1
+            bullDomEndPlot := true
+        else if lastDominance == -1
+            bearDomEndPlot := true
+
+lastDominance := currentDominance
+
+plotshape(showAndean and bullDomStartPlot, title="Bull Dominance Start", style=shape.labelup,   location=location.belowbar, color=color.new(color.green, 0), text="A++", size=size.tiny)
+plotshape(showAndean and bearDomStartPlot, title="Bear Dominance Start", style=shape.labeldown, location=location.abovebar, color=color.new(color.red,   0), text="A--", size=size.tiny)
+plotshape(showAndean and bullDomEndPlot,   title="Bull Dominance End",   style=shape.labeldown, location=location.abovebar, color=color.new(color.green, 0), text="End", size=size.tiny)
+plotshape(showAndean and bearDomEndPlot,   title="Bear Dominance End",   style=shape.labelup,   location=location.belowbar, color=color.new(color.red,   0), text="End", size=size.tiny)
+
+//==========================================================================//
+//                      Smooth Price Oscillator - Big beluga Original                    //
+//==========================================================================//
+
+// ＩＮＰＵＴＳ ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+// // Input variables for length and threshold
+int    beluga_len_smooth   = input.int(7, "BB Smoothing Length", group="Smooth Price Oscillator")
+float  beluga_threshold    = input.float(1, "BB Threshold", step = 0.1, group="Smooth Price Oscillator")
+
+// // Length for calculating standard deviation
+int    beluga_len_std      = input.int(50, "BB StdDev Length", group="Smooth Price Oscillator")
+
+// Create an array to store standard deviation values
+float[] std_array   = array.new<float>(len_std)
+// }
+
+// ＦＵＮＣＴＩＯＮＳ ―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+// @function SuperSmoother filter based on Ehlers Filter
+// @param price (float) The price series to be smoothed
+// @param period (int) The smoothing period
+// @returns [float] Smoothed price
+method smoother_F(float price, int period) =>
+    float step     = 2.0 * math.pi / period
+    float a1       = math.exp(-math.sqrt(2) * math.pi / period)
+    float b1       = 2 * a1 * math.cos(math.sqrt(2) * step / period)
+    float c2       = b1
+    float c3       = -a1 * a1
+    float c1       = 1 - c2 - c3
+    float smoothed = 0.0
+    smoothed := bar_index >= 4 
+                 ? c1 * (price + price[1]) / 2 + c2 * smoothed[1] + c3 * smoothed[2] 
+                 : price
+    smoothed
+// }
+
+// ＣＡＬＣＵＬＡＴＩＯＮＳ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+// Smoothing lines using the SuperSmoother function
+float line_long     = close.smoother_F(beluga_len_smooth * 2)
+float line_short    = close.smoother_F(beluga_len_smooth)
+
+// Oscillator calculation
+float oscillator    = line_short - line_long
+
+// Standard deviation for the oscillator
+float stdev_osc     = ta.stdev(oscillator, len_std)
+
+// Populate standard deviation values into the array
+for int i = 0 to len_std - 1
+    array.set(std_array, i, stdev_osc[i])
+
+// Shift array if size exceeds len_std
+if array.size(std_array) >= len_std
+    array.shift(std_array)
+
+// Normalize the oscillator using the maximum value from the standard deviation array
+float normalized_osc = ta.hma(oscillator / array.max(std_array), 30)
+
+// Bands for the oscillator
+float basis          = ta.ema(normalized_osc, 250)
+float deviation      = 2 * ta.stdev(normalized_osc, 250)
+float upper_band     = basis + deviation
+float lower_band     = basis - deviation
+// }
+
+
+
+
+// ＳＩＧＮＡＬＳ―――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――{
+// Buy/Sell signal conditions
+bool signal_up = normalized_osc <-beluga_threshold and ta.crossover(normalized_osc, normalized_osc[1])
+bool signal_dn = normalized_osc > beluga_threshold and ta.crossover(normalized_osc[1], normalized_osc)
+
+bool strongDown = signal_dn and normalized_osc > upper_band
+bool strongUp   = signal_up and normalized_osc < lower_band
+// --- MODIFICATION: Create boolean variables for mean reversion signals ---
+bool meanRevDownSignal = signal_dn and normalized_osc < upper_band
+bool meanRevUpSignal   = signal_up and normalized_osc > lower_band
+
+// Plot chart signals for mean reversion
+plotshape(signal_dn and normalized_osc < upper_band, location = location.abovebar, style = shape.xcross, size = size.tiny, text = "↷", textcolor = chart.fg_color, color = color.orange, title = "Mean Reversion Down", force_overlay = true)
+plotshape(signal_dn and normalized_osc > upper_band, location = location.abovebar, style = shape.xcross, size = size.tiny, text = "+\n↷", textcolor = chart.fg_color, color = color.orange, title = "Strong Mean Reversion Down", force_overlay = true)
+plotshape(signal_up and normalized_osc < lower_band, location = location.belowbar, style = shape.circle, size = size.tiny, text = "⤻\n+", textcolor = chart.fg_color, color = color.aqua, title = "Strong Mean Reversion Up", force_overlay = true)
+plotshape(signal_up and normalized_osc > lower_band, location = location.belowbar, style = shape.circle, size = size.tiny, text = "⤻", textcolor = chart.fg_color, color = color.aqua, title = "Mean Reversion Up", force_overlay = true)
+
+// Plot oscillator signals at exact levels
+plotshape(series = signal_up ? normalized_osc[1] : na, title = "SmoothOsc Up Dot", style = shape.circle, location = location.absolute, size = size.tiny, color = color.aqua, force_overlay = false, offset = -1)
+plotshape(series = signal_dn ? normalized_osc[1] : na, title = "SmoothOsc Down X", style = shape.xcross, location = location.absolute, size = size.tiny, color = color.orange, force_overlay = false, offset = -1)
+// }
+//==========================================================================//
+//                        WaveTrend Signals Integration                     //
+//==========================================================================//
+srcWT   = input.string('hlc3', "WT Source", options=['open','high','low','close','oc2','hl2','hlc3','ohlc4','hlcc4'], group="WaveTrend")
+clenWT  = input.int(10, "WT Channel Length", minval=1, maxval=50, group="WaveTrend")
+alenWT  = input.int(21, "WT Average Length", minval=1, maxval=50, group="WaveTrend")
+slenWT  = input.int(4,  "WT Signal Length",  minval=1, maxval=7,  group="WaveTrend")
+revb    = input.bool(true, "Enable Reversion Signals?", group="WaveTrend")
+revt    = input.int(100, "Reversion Threshold", options=[100,125], group="WaveTrend")
+
+type bar
+    float o
+    float h
+    float l
+    float c
+
+type osc
+    float o
+    float s
+    float h
+
+type alerts
+    bool s
+    bool b
+    bool u
+    bool d
+    bool x
+    bool y
+
+srcMethod(_o, _h, _l, _c, _src) =>
+    switch _src
+        'open'  => _o
+        'high'  => _h
+        'low'   => _l
+        'close' => _c
+        'oc2'   => math.avg(_o, _c)
+        'hl2'   => math.avg(_h, _l)
+        'hlc3'  => math.avg(_h, _l, _c)
+        'ohlc4' => math.avg(_o, _h, _l, _c)
+        'hlcc4' => math.avg(_h, _l, _c, _c)
+
+wave(_srcVal, _clen, _alen, _slen) =>
+    m = ta.ema(_srcVal, _clen)
+    d = ta.stdev(_srcVal, _clen)
+    o = ta.ema((_srcVal - m) / d * 100, _alen)
+    s = ta.sma(o, _slen)
+    [o, s, o - s]
+
+bar_o = open
+bar_h = high
+bar_l = low
+bar_c = close
+
+xVal = srcMethod(bar_o, bar_h, bar_l, bar_c, srcWT)
+[oWT, sWT, hWT] = wave(xVal, clenWT, alenWT, slenWT)
+
+a_s = ta.crossover(oWT, sWT) and oWT < -revt
+a_b = ta.crossunder(oWT, sWT) and oWT >  revt
+a_u = ta.crossover(oWT, 0)
+a_d = ta.crossunder(oWT, 0)
+a_x = ta.crossover(oWT, sWT) 
+a_y = ta.crossunder(oWT, sWT)
+
+// Plot small circles for OB/OS
+plotchar(revb and a_b ? oWT + 40 : na, title="OB Circle", char="⚬", location=location.abovebar, color=color.new(color.red,0),   size=size.small)
+plotchar(revb and a_s ? oWT - 40 : na, title="OS Circle", char="⚬", location=location.belowbar, color=color.new(color.green,0), size=size.small)
+
+//==========================================================================//
+//                      TRADING SECTION START (WaveTrend Only)             //
+//==========================================================================//
+
+// 0) Inputs for TSL
+enableTSL       = input.bool(true, "Enable TSL?", group="WaveTrend Strategy")
+tslTriggerPips  = 30.0
+tslTrailPips    = 15.0
+
+float tp_mult = 6.0
+float sl_mult = 3.0
+
+float min_sl_pips = 25
+float max_sl_pips = 45
+float min_tp_pips = 15
+
+float dual_min_sl_pips = 25
+float dual_max_sl_pips = 40
+float dual_min_tp_pips = 15
+
+// Define whether we have an open position
+var bool inLongWaveTrend  = false
+var bool inShortWaveTrend = false
+
+// Arrays to track Dual Trend entries
+var float[] entryPriceDT = array.new_float()
+var float[] stopLossDT = array.new_float()
+
+// Track entry price, SL, TP for WaveTrend trades
+// These are now arrays to store multiple entries
+var float[] entryPriceWT  = array.new_float()
+var float[] stopLossWT    = array.new_float()
+var float[] takeProfitWT  = array.new_float()
+
+// WaveTrend Entry Conditions
+// --- MODIFICATION: Add Andean validation logic ---
+bool wtLongCondition  = a_s and window() and (not enableAndeanValidation or not bearDominance or (bearDominance and ta.barssince(strongUp) <= 2))  // Using a_s for long entry (OS Circle)
+bool wtShortCondition = a_b and window() and (not enableAndeanValidation or not bullDominance or (bullDominance and ta.barssince(strongDown) <= 2)) // Using a_b for short entry (OB Circle)
+
+// Helper to convert pips to raw price distance (adjust if needed)
+f_pipsToPrice(_pips) => _pips * pip
+
+// 4) Each new waveTrend signal triggers a potential add of 2M
+float incrementSize = 2000000.0  // 2M increments
+
+// 3) Max position size you allow per side:
+float maxPosition = 8000000.0    // i.e. 8M
+
+////////////////////////////////////////////////////////////////////////////////
+//     HELPER FUNCTIONS
+////////////////////////////////////////////////////////////////////////////////
+
+
+// Function to format the quantity string
+formatQty(qty) =>
+    string formattedQty = ""
+    if qty >= 1000000
+        formattedQty := str.format("{0}M", math.round(qty / 1000000))
+    else if qty >= 1000
+        formattedQty := str.format("{0}K", math.round(qty / 1000))
+    else
+        formattedQty := str.tostring(qty)
+    formattedQty
+
+
+// a) Add a new LONG partial
+f_addLong() =>
+    // Only add if net position < 8M
+    if strategy.position_size < maxPosition
+        float sizeToAdd = math.min(incrementSize, maxPosition - strategy.position_size)
+        strategy.entry("WaveTrend_Long", strategy.long, qty=sizeToAdd, comment=formatQty(sizeToAdd) + " long wave")
+        
+        array.push(entryPriceWT, close)
+
+        float atrVal = ta.atr(shortAtrPeriod)
+        float initSL = close - sl_mult * atrVal
+        float finalSL = math.min(initSL, close - min_sl_pips*pip)
+        finalSL := math.max(finalSL, close - max_sl_pips*pip)
+        array.push(stopLossWT, finalSL)
+
+        float initTP = close + tp_mult * atrVal
+        float finalTP = math.max(initTP, close + min_tp_pips*pip)
+        array.push(takeProfitWT, finalTP)
+
+        // === ADD LINES (5 BARS WIDE) FOR SL & TP ===
+        line.new(bar_index, finalSL, bar_index + 5, finalSL, extend=extend.none, color=color.new(color.red, 0), width=2)
+        line.new(bar_index, finalTP, bar_index + 5, finalTP, extend=extend.none, color=color.new(color.green, 0), width=2)
+
+
+// b) Add a new SHORT partial
+f_addShort() =>
+    if math.abs(strategy.position_size) < maxPosition
+        float currentAbsPos = math.abs(strategy.position_size)
+        float sizeToAdd = math.min(incrementSize, maxPosition - currentAbsPos)
+        strategy.entry("WaveTrend_Short", strategy.short, qty=sizeToAdd, comment=formatQty(sizeToAdd) + " short wave")
+        // Arrays
+        array.push(entryPriceWT, close)
+
+        float atrVal = ta.atr(shortAtrPeriod)
+        float initSL = close + sl_mult * atrVal
+        // Ensure SL is at least 30 pips away but no more than 60 pips away
+        float finalSL = math.max(initSL, close + min_sl_pips*pip)
+        finalSL := math.min(finalSL, close + max_sl_pips*pip)
+        array.push(stopLossWT, finalSL)
+
+        float initTP = close - tp_mult * atrVal
+        // Ensure TP is at least 20 pips away
+        float finalTP = math.min(initTP, close - min_tp_pips*pip)
+        array.push(takeProfitWT, finalTP)
+
+        // === ADD LINES (5 BARS WIDE) FOR SL & TP ===
+        line.new(bar_index, finalSL, bar_index + 5, finalSL, extend=extend.none, color=color.new(color.red, 0), width=2)
+        line.new(bar_index, finalTP, bar_index + 5, finalTP, extend=extend.none, color=color.new(color.green, 0), width=2)
+
+// c) Re-issue all exits for the aggregated position
+f_updateExits(isLong) =>
+    if isLong
+        for i = 0 to array.size(entryPriceWT)-1
+            float stopPrice = array.get(stopLossWT, i)
+            float limitPrice = array.get(takeProfitWT, i)
+            // Separate exits for SL and TP
+            strategy.exit("WaveTrend Long SL", "WaveTrend_Long", stop = stopPrice, comment = "Long SL")
+            strategy.exit("WaveTrend Long TP", "WaveTrend_Long", limit = limitPrice, comment = "Long TP")
+    else
+        for i = 0 to array.size(entryPriceWT)-1
+            float stopPrice = array.get(stopLossWT, i)
+            float limitPrice = array.get(takeProfitWT, i)
+            // Separate exits for SL and TP
+            strategy.exit("WaveTrend Short SL", "WaveTrend_Short", stop = stopPrice, comment = "Short SL")
+            strategy.exit("WaveTrend Short TP", "WaveTrend_Short", limit = limitPrice, comment = "Short TP")
+
+// Generalized Trailing Stop Loss Function
+f_applyTSL() =>
+    if enableTSL and strategy.position_size != 0
+        bool isLongPos  = strategy.position_size > 0
+        bool isShortPos = strategy.position_size < 0
+
+        // WaveTrend TSL
+        if array.size(entryPriceWT) > 0
+            for i = 0 to array.size(entryPriceWT) - 1
+                float ePrice = array.get(entryPriceWT, i)
+                float oldStop = array.get(stopLossWT, i)
+
+                if isLongPos
+                    if close >= ePrice + f_pipsToPrice(tslTriggerPips)
+                        float newStop = ePrice + f_pipsToPrice(tslTrailPips)
+                        float finalStop = math.max(oldStop, newStop)
+                        array.set(stopLossWT, i, finalStop)
+                        // Add "TSL" to the exit comment if TSL is triggered
+                        strategy.exit("Exit WaveTrend Long", "WaveTrend_Long", stop=finalStop, limit=array.get(takeProfitWT, i), comment="Exit TSL")
+
+                if isShortPos
+                    if close <= ePrice - f_pipsToPrice(tslTriggerPips)
+                        float newStop = ePrice - f_pipsToPrice(tslTrailPips)
+                        float finalStop = math.min(oldStop, newStop)
+                        array.set(stopLossWT, i, finalStop)
+                        // Add "TSL" to the exit comment if TSL is triggered
+                        strategy.exit("Exit WaveTrend Short", "WaveTrend_Short", stop=finalStop, limit=array.get(takeProfitWT, i), comment="Exit TSL")
+
+            // Re-issue exits for WaveTrend trades
+            f_updateExits(isLongPos)
+
+        // Dual Trend TSL
+        if array.size(entryPriceDT) > 0
+            for i = 0 to array.size(entryPriceDT) - 1
+                float ePrice = array.get(entryPriceDT, i)
+                float oldStop = array.get(stopLossDT, i)
+
+                if isLongPos
+                    if close >= ePrice + f_pipsToPrice(tslTriggerPips)
+                        float newStop = ePrice + f_pipsToPrice(tslTrailPips)
+                        float finalStop = math.max(oldStop, newStop)
+                        array.set(stopLossDT, i, finalStop)
+                        // Add "TSL" to the exit comment if TSL is triggered
+                        strategy.exit("DualTrendLong Exit", "DualTrendLong", stop=finalStop, comment="Exit TSL")
+
+                if isShortPos
+                    if close <= ePrice - f_pipsToPrice(tslTriggerPips)
+                        float newStop = ePrice - f_pipsToPrice(tslTrailPips)
+                        float finalStop = math.min(oldStop, newStop)
+                        array.set(stopLossDT, i, finalStop)
+                        // Add "TSL" to the exit comment if TSL is triggered
+                        strategy.exit("DualTrendShort Exit", "DualTrendShort", stop=finalStop, comment="Exit TSL")
+
+// Function to calculate the quantity to close, considering the minimum quantity
+calculateCloseQty(positionSize, percentToClose) =>
+    qtyToClose = math.abs(positionSize) * (percentToClose / 100)
+    if qtyToClose < 1000000 and math.abs(positionSize) - qtyToClose >= 1000000
+        qtyToClose := 1000000
+    else if qtyToClose < 1000000 and math.abs(positionSize) > 1000000
+        qtyToClose := math.abs(positionSize) - 1000000
+    else if qtyToClose < 1000000
+        qtyToClose := math.abs(positionSize)
+    qtyToClose
+
+
+////////////////////////////////////////////////////////////////////////////////
+//     MAIN LOGIC: Each signal attempts to add 2M until 8M total
+////////////////////////////////////////////////////////////////////////////////
+
+// =============== LONG ENTRY ===============
+if wtLongCondition
+    // If we have a short position, close it first
+    if (inShortWaveTrend)
+        strategy.close_all()
+        // Reset the flags as all positions are closed
+        inLongWaveTrend := false
+        inShortWaveTrend := false
+        // Clear the arrays
+        array.clear(entryPriceWT)
+        array.clear(stopLossWT)
+        array.clear(takeProfitWT)
+
+    // Then add a new long position
+    f_addLong()
+    inLongWaveTrend  := true
+    inShortWaveTrend := false
+    if array.size(entryPriceWT) > 0
+        f_updateExits(true)
+
+// =============== SHORT ENTRY ===============
+if wtShortCondition
+    // If we have a long position, close it first
+    if (inLongWaveTrend)
+        strategy.close_all()
+        // Reset the flags as all positions are closed
+        inLongWaveTrend := false
+        inShortWaveTrend := false
+        // Clear the arrays
+        array.clear(entryPriceWT)
+        array.clear(stopLossWT)
+        array.clear(takeProfitWT)
+
+    f_addShort()
+    inShortWaveTrend := true
+    inLongWaveTrend  := false
+    if array.size(entryPriceWT) > 0
+        f_updateExits(false)
+
+
+// EARLY EXIT
+if enableStrongExit or enableMeanRevExit
+    // Input for the percentage to close on early exit
+    earlyExitPercent = input.int(50, title="Early Exit %", minval=1, maxval=100, group="Early Exit Settings")
+
+    // Variables to track if strong exit has already been triggered for the current signal
+    var bool strongDownTriggered = false
+    var bool strongUpTriggered = false
+
+    // Variables to track if mean reversion exit has already been triggered for the current signal
+    var bool meanRevDownTriggered = false
+    var bool meanRevUpTriggered = false
+
+    
+
+    // 1) Early exit from WAVE TREND trades
+    if inLongWaveTrend
+        if enableStrongExit and strongDown and not strongDownTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the WaveTrend_Long position
+            strategy.close("WaveTrend_Long", qty=qtyToClose, comment=str.format("Early Exit: StrongDown ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            strongDownTriggered := true  // Mark that the exit has been triggered
+        if enableMeanRevExit and meanRevDownSignal and not meanRevDownTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the WaveTrend_Long position
+            strategy.close("WaveTrend_Long", qty=qtyToClose, comment=str.format("Early Exit: MeanRevDown ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            meanRevDownTriggered := true  // Mark that the exit has been triggered
+
+    if inShortWaveTrend
+        if enableStrongExit and strongUp and not strongUpTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the WaveTrend_Short position
+            strategy.close("WaveTrend_Short", qty=qtyToClose, comment=str.format("Early Exit: StrongUp ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            strongUpTriggered := true  // Mark that the exit has been triggered
+        if enableMeanRevExit and meanRevUpSignal and not meanRevUpTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the WaveTrend_Short position
+            strategy.close("WaveTrend_Short", qty=qtyToClose, comment=str.format("Early Exit: MeanRevUp ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            meanRevUpTriggered := true  // Mark that the exit has been triggered
+
+    // 2) Early exit from DUAL TREND trades long
+    if strategy.position_size > 0
+        if enableStrongExit and strongDown and not strongDownTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the DualTrendLong position
+            strategy.close("DualTrendLong", qty=qtyToClose, comment=str.format("Early Exit: StrongDown ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            strongDownTriggered := true  // Mark that the exit has been triggered
+            strategy.close("WaveTrend_Long", qty=qtyToClose, comment=str.format("Early Exit: StrongDown ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+
+        if enableMeanRevExit and meanRevDownSignal and not meanRevDownTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the DualTrendLong position
+            strategy.close("DualTrendLong", qty=qtyToClose, comment=str.format("Early Exit: MeanRevDown ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            meanRevDownTriggered := true  // Mark that the exit has been triggered
+            strategy.close("WaveTrend_Long", qty=qtyToClose, comment=str.format("Early Exit: MeanRevDown ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            
+
+    if strategy.position_size < 0 // short
+        if enableStrongExit and strongUp and not strongUpTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the DualTrendShort position
+            strategy.close("DualTrendShort", qty=qtyToClose, comment=str.format("Early Exit: StrongUp ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            strongUpTriggered := true  // Mark that the exit has been triggered
+            strategy.close("WaveTrend_Short", qty=qtyToClose, comment=str.format("Early Exit: StrongUp ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+
+        if enableMeanRevExit and meanRevUpSignal and not meanRevUpTriggered
+            // Calculate the quantity to close
+            qtyToClose = calculateCloseQty(strategy.position_size, earlyExitPercent)
+            // Close the calculated percentage of the DualTrendShort position
+            strategy.close("DualTrendShort", qty=qtyToClose, comment=str.format("Early Exit: MeanRevUp ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            meanRevUpTriggered := true  // Mark that the exit has been triggered
+            strategy.close("WaveTrend_Short", qty=qtyToClose, comment=str.format("Early Exit: MeanRevUp ({0}%)", math.round(qtyToClose / math.abs(strategy.position_size) * 100)))
+            
+    // Reset trigger variables when the strong signal is no longer active
+    if not strongDown
+        strongDownTriggered := false
+    if not strongUp
+        strongUpTriggered := false
+    if not meanRevDownSignal
+        meanRevDownTriggered := false
+    if not meanRevUpSignal
+        meanRevUpTriggered := false
+////////////////////////////////////////////////////////////////////////////////
+//     TRAILING STOP LOSS (TSL) if enabled
+////////////////////////////////////////////////////////////////////////////////
+if enableTSL and strategy.position_size != 0
+    bool isLongPos  = strategy.position_size > 0
+    bool isShortPos = strategy.position_size < 0
+
+    // Only loop through the arrays if there are entries
+    if array.size(entryPriceWT) > 0
+        for i = 0 to array.size(entryPriceWT) - 1
+            float ePrice  = array.get(entryPriceWT, i)
+            float oldStop = array.get(stopLossWT, i)
+
+            // If LONG
+            if isLongPos
+                // Check if we have >= 15 pips in profit
+                if close >= ePrice + f_pipsToPrice(tslTriggerPips)
+                    // Move SL to ePrice + 5 pips, but never loosen
+                    float newStop = ePrice + f_pipsToPrice(tslTrailPips)
+                    float finalStop = math.max(oldStop, newStop)
+                    array.set(stopLossWT, i, finalStop)
+
+            // If SHORT
+            if isShortPos
+                // Price in favor by 15 pips => ePrice - 15 pips
+                if close <= ePrice - f_pipsToPrice(tslTriggerPips)
+                    // newStop = ePrice - 5 pips,
+                    // but we only tighten the stop (lower the number)
+                    float newStop = ePrice - f_pipsToPrice(tslTrailPips)
+                    float finalStop = math.min(oldStop, newStop)
+                    array.set(stopLossWT, i, finalStop)
+
+        // After adjusting TSL for each partial, re-issue the exits
+        if array.size(entryPriceWT) > 0
+            f_updateExits(isLongPos)
+
+// =============== RESET ARRAYS IF FLAT ===============
+if strategy.position_size == 0
+    inLongWaveTrend  := false
+    inShortWaveTrend := false
+    array.clear(entryPriceWT)
+    array.clear(stopLossWT)
+    array.clear(takeProfitWT)
+
+//==========================================================================//
+//                       TRADING SECTION END (WaveTrend Only)                //
+//==========================================================================//
+
+
+
+//==========================================================================//
+//     TRADING SECTION START (DUAL TREND: SSL+AF with Ultra+Long)           //
+//==========================================================================//
+enableDualTrendTrade = input.bool(true, "Enable Dual Trend Condition Trading?")
+
+// Conditions are now evaluated *before* strategy.entry and strategy.exit
+// Check if dual trend trading is enabled, SSL buy signal is triggered, both ultra-long and long trends are bullish, and no position is currently open
+bool dualLongCondition = enableDualTrendTrade and window() and newSslBuySignal and ultraLongTrend == 1 and sigcolor == col_bull and (not enableDualTrendDemaValidation or close > dema)
+
+// Check if dual trend trading is enabled, SSL sell signal is triggered, both ultra-long and long trends are bearish, and no position is currently open2
+bool dualShortCondition = enableDualTrendTrade and window() and newSslSellSignal and ultraLongTrend == -1 and sigcolor == col_bear and (not enableDualTrendDemaValidation or close < dema)
+
+// Reset newSslBuySignal and newSslSellSignal after plotting
+newSslBuySignal := false
+newSslSellSignal := false
+
+// ATR-based SL/TP (1.5×ATR SL, 2.0×ATR TP, you can change it as needed)
+float SSL_AF_SL_MULT = 2.0
+float SSL_AF_TP_MULT = 3.0
+
+
+
+// AF SSL ULTRA LONG
+if dualLongCondition
+    float atrVal1 = ta.atr(shortAtrPeriod)
+    float entryPriceL = close
+    float stopLossL   = entryPriceL - SSL_AF_SL_MULT * atrVal1
+    float takeProfitL = entryPriceL + SSL_AF_TP_MULT * atrVal1
+
+    // Ensure SL and TP adhere to the globally defined minimums and maximums
+    stopLossL := math.min(stopLossL, entryPriceL - dual_min_sl_pips * pip)
+    stopLossL := math.max(stopLossL, entryPriceL - dual_max_sl_pips * pip)
+    takeProfitL := math.max(takeProfitL, entryPriceL + dual_min_tp_pips * pip)
+
+    strategy.entry("DualTrendLong", strategy.long, qty=dualTrendPositionSize, comment=formatQty(dualTrendPositionSize) + " long dual")
+    // --- Minimal change: separate exits for SL vs. TP
+    strategy.exit("DualTrendLong SL",   "DualTrendLong", stop=stopLossL,  comment="Dual Long SL")
+    strategy.exit("DualTrendLong TP",   "DualTrendLong", limit=takeProfitL, comment="Dual Long TP")
+    // === ADD LINES (5 BARS WIDE) FOR SL & TP ===
+    // Plot TP and SL lines using line.new()
+    line.new(bar_index, stopLossL, bar_index + dtTpSlLineLength, stopLossL,extend=extend.none, color=color.new(color.red, 0), width=2)
+    line.new(bar_index, takeProfitL, bar_index + dtTpSlLineLength, takeProfitL,extend=extend.none, color=color.new(color.green, 0), width=2)
+
+
+if dualShortCondition
+    float atrVal2 = ta.atr(shortAtrPeriod)
+    float entryPriceS = close
+    float stopLossS   = entryPriceS + SSL_AF_SL_MULT * atrVal2
+    float takeProfitS = entryPriceS - SSL_AF_TP_MULT * atrVal2
+
+    // Ensure SL and TP adhere to the globally defined minimums and maximums
+    stopLossS := math.max(stopLossS, entryPriceS + dual_min_sl_pips * pip)
+    stopLossS := math.min(stopLossS, entryPriceS + dual_max_sl_pips * pip)
+    takeProfitS := math.min(takeProfitS, entryPriceS - dual_min_tp_pips * pip)
+
+    strategy.entry("DualTrendShort", strategy.short, qty=dualTrendPositionSize, comment=formatQty(dualTrendPositionSize) + " short dual")
+    // --- Minimal change: separate exits for SL vs. TP
+    strategy.exit("DualTrendShort SL",   "DualTrendShort", stop=stopLossS,  comment="Dual Short SL")
+    strategy.exit("DualTrendShort TP",   "DualTrendShort", limit=takeProfitS, comment="Dual Short TP")
+    // Plot TP and SL lines using line.new()
+    line.new(bar_index, stopLossS, bar_index + dtTpSlLineLength, stopLossS,extend=extend.none, color=color.new(color.red, 0), width=2)
+    line.new(bar_index, takeProfitS, bar_index + dtTpSlLineLength, takeProfitS,extend=extend.none, color=color.new(color.green, 0), width=2)
